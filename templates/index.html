@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>CustomerGraph - Kundensegmentierung mit neo4j</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 960px; margin: 40px auto; padding: 0 20px; color: #222; }
+        h1 { color: #2c3e50; margin-bottom: 4px; }
+        .subtitle { color: #777; margin-top: 0; }
+        .stats { display: flex; gap: 14px; margin: 20px 0; flex-wrap: wrap; }
+        .stat-box { background: #f1f3f5; border-radius: 8px; padding: 10px 16px; font-size: 13px; }
+        .stat-box b { display: block; font-size: 20px; color: #2c3e50; }
+
+        .segmente { display: flex; gap: 14px; flex-wrap: wrap; margin: 20px 0; }
+        .segment-card { flex: 1; min-width: 210px; background: #fff; border: 1px solid #ddd; border-radius: 10px; padding: 16px; }
+        .segment-card h3 { margin: 0 0 8px 0; font-size: 15px; }
+        .segment-card .zahl { font-size: 26px; font-weight: bold; color: #2c3e50; }
+        .segment-card .mitglieder { font-size: 12px; color: #777; margin-top: 8px; }
+        .tag-premium { border-top: 4px solid #2e7d32; }
+        .tag-abwanderung { border-top: 4px solid #c0392b; }
+        .tag-neukunden { border-top: 4px solid #2980b9; }
+        .tag-gelegenheit { border-top: 4px solid #f39c12; }
+
+        .kunden-leiste { margin: 20px 0; }
+        .kunden-btn { margin: 4px; padding: 8px 16px; background: #3498db; color: white;
+                      border: none; border-radius: 6px; cursor: pointer; font-size: 13px; text-decoration: none; display: inline-block; }
+        .kunden-btn:hover { background: #2980b9; }
+        .kunden-btn.aktiv { background: #1b4965; }
+
+        .box { background: #f8f9fa; border-radius: 10px; padding: 22px; margin: 20px 0; }
+        .rfm-grid { display: flex; gap: 16px; margin: 14px 0; }
+        .rfm-box { background: white; border-radius: 8px; padding: 12px 18px; text-align: center; border: 1px solid #e0e0e0; }
+        .rfm-box .label { font-size: 12px; color: #888; }
+        .rfm-box .wert { font-size: 22px; font-weight: bold; color: #2c3e50; }
+        .rfm-box .score { font-size: 12px; color: #2980b9; }
+
+        table { border-collapse: collapse; width: 100%; margin-top: 10px; }
+        th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #ddd; font-size: 14px; }
+        th { color: #555; }
+        .refresh { font-size: 13px; color: #888; text-decoration: none; }
+        code { background: #eee; padding: 2px 5px; border-radius: 4px; font-size: 13px; }
+
+        #netz { width: 100%; height: 480px; background: #fff; border: 1px solid #ddd; border-radius: 10px; }
+        .legende { display: flex; gap: 16px; flex-wrap: wrap; margin: 10px 0 0 0; font-size: 12px; color: #555; }
+        .legende span { display: inline-flex; align-items: center; gap: 6px; }
+        .punkt { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    </style>
+    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+</head>
+<body>
+    <h1>CustomerGraph</h1>
+    <p class="subtitle">Kundensegmentierung mit neo4j — RFM-Analyse + Graph-Community-Detection</p>
+
+    <div class="stats">
+        <div class="stat-box"><b>{{ statistik.kunden }}</b>Kunden</div>
+        <div class="stat-box"><b>{{ statistik.kaeufe }}</b>Transaktionen</div>
+        <div class="stat-box"><b>{{ statistik.aehnlichkeiten }}</b>AEHNLICH_WIE-Kanten</div>
+        <div class="stat-box"><b>{{ statistik.segmente }}</b>Segmente (automatisch erkannt)</div>
+    </div>
+
+    <h2>Segmentuebersicht</h2>
+    <div class="segmente">
+        {% for s in segmente %}
+        <div class="segment-card
+            {% if 'Premium' in s.segment %}tag-premium
+            {% elif 'Abwanderung' in s.segment %}tag-abwanderung
+            {% elif 'Neukunden' in s.segment %}tag-neukunden
+            {% else %}tag-gelegenheit{% endif %}">
+            <h3>{{ s.segment }}</h3>
+            <div class="zahl">{{ s.mitglieder|length }}</div>
+            <div style="font-size:12px;color:#555">Ø R {{ s.avg_r }} · Ø F {{ s.avg_f }} · Ø M {{ s.avg_m }}</div>
+            <div style="font-size:12px;color:#555">Ø Umsatz: {{ s.avg_umsatz }}&euro;</div>
+            <div class="mitglieder">{{ s.mitglieder|join(', ') }}</div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <h2>Aehnlichkeitsnetzwerk</h2>
+    <p style="font-size:13px;color:#666;margin-top:-6px">
+        Jeder Punkt ist ein Kunde, jede Linie eine <code>AEHNLICH_WIE</code>-Kante (dicker = aehnlicher).
+        Farbe = automatisch erkanntes Segment. Klick auf einen Kunden oeffnet sein Profil.
+    </p>
+    <div id="netz"></div>
+    <div class="legende">
+        <span><span class="punkt" style="background:#2e7d32"></span>Premium-Stammkunden</span>
+        <span><span class="punkt" style="background:#c0392b"></span>Abwanderungsgefaehrdete Kunden</span>
+        <span><span class="punkt" style="background:#2980b9"></span>Neukunden mit Potenzial</span>
+        <span><span class="punkt" style="background:#f39c12"></span>Gelegenheitskaeufer</span>
+    </div>
+
+    <p>Kunde auswaehlen fuer RFM-Profil und aehnliche Kunden:</p>
+    <div class="kunden-leiste">
+        {% for k in kunden %}
+        <a href="/kunde?name={{ k.name }}" class="kunden-btn {% if k.name == aktiver_kunde %}aktiv{% endif %}">{{ k.name }}</a>
+        {% endfor %}
+    </div>
+
+    {% if profil %}
+    <div class="box">
+        <h2>{{ profil.name }} <span style="font-size:14px;font-weight:normal;color:#777">— {{ profil.segment }}</span></h2>
+
+        <div class="rfm-grid">
+            <div class="rfm-box">
+                <div class="label">Recency</div>
+                <div class="wert">{{ profil.recency_tage }} Tage</div>
+                <div class="score">R-Score: {{ profil.r_score }}/5</div>
+            </div>
+            <div class="rfm-box">
+                <div class="label">Frequency</div>
+                <div class="wert">{{ profil.frequency }}</div>
+                <div class="score">F-Score: {{ profil.f_score }}/5</div>
+            </div>
+            <div class="rfm-box">
+                <div class="label">Monetary</div>
+                <div class="wert">{{ profil.monetary }}&euro;</div>
+                <div class="score">M-Score: {{ profil.m_score }}/5</div>
+            </div>
+        </div>
+
+        <h3>Kaufhistorie</h3>
+        <table>
+            <tr><th>Produkt</th><th>Betrag</th><th>Datum</th></tr>
+            {% for k in profil.kaeufe %}
+            <tr><td>{{ k.produkt }}</td><td>{{ k.betrag }}&euro;</td><td>{{ k.datum }}</td></tr>
+            {% endfor %}
+        </table>
+
+        <h3>Aehnlichste Kunden (euklidische Aehnlichkeit der RFM-Profile)</h3>
+        <table>
+            <tr><th>Kunde</th><th>Segment</th><th>Aehnlichkeit</th></tr>
+            {% for a in aehnliche %}
+            <tr><td>{{ a.kunde }}</td><td>{{ a.segment }}</td><td>{{ a.score }}</td></tr>
+            {% endfor %}
+        </table>
+    </div>
+    {% endif %}
+
+    <p><a class="refresh" href="/neu-berechnen">Testdaten neu laden &amp; Pipeline (RFM &rarr; Aehnlichkeit &rarr; Segmente) neu berechnen</a></p>
+
+    <hr>
+    <p style="font-size:13px;color:#888">
+        Segment-Zuordnung per Label Propagation auf dem <code>AEHNLICH_WIE</code>-Netzwerk,
+        Namensvergabe je Cluster ueber dessen durchschnittliches RFM-Profil. Details in <code>docs/Dokumentation.md</code>.
+    </p>
+
+    <script>
+        function segmentFarbe(segment) {
+            if (!segment) return "#999999";
+            if (segment.includes("Premium")) return "#2e7d32";
+            if (segment.includes("Abwanderung")) return "#c0392b";
+            if (segment.includes("Neukunden")) return "#2980b9";
+            return "#f39c12";
+        }
+
+        fetch("/graph-daten")
+            .then(response => response.json())
+            .then(daten => {
+                const nodes = new vis.DataSet(daten.nodes.map(n => ({
+                    id: n.id,
+                    label: n.label,
+                    title: (n.group || "") + " · Umsatz: " + n.umsatz + "€",
+                    color: segmentFarbe(n.group),
+                })));
+
+                const edges = new vis.DataSet(daten.edges.map(e => ({
+                    from: e.from,
+                    to: e.to,
+                    value: e.value,
+                    title: "Aehnlichkeit: " + e.value,
+                })));
+
+                const container = document.getElementById("netz");
+                const data = { nodes: nodes, edges: edges };
+                const optionen = {
+                    nodes: { shape: "dot", size: 16, font: { size: 13, color: "#333" } },
+                    edges: { color: { color: "#c9c9c9", highlight: "#2980b9" }, smooth: false, scaling: { min: 1, max: 6 } },
+                    physics: { stabilization: true, barnesHut: { gravitationalConstant: -4000, springLength: 140 } },
+                    interaction: { hover: true },
+                };
+                const netzwerk = new vis.Network(container, data, optionen);
+
+                netzwerk.on("click", function (params) {
+                    if (params.nodes.length > 0) {
+                        window.location.href = "/kunde?name=" + encodeURIComponent(params.nodes[0]);
+                    }
+                });
+            });
+    </script>
+</body>
+</html>
